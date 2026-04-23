@@ -363,17 +363,6 @@ function ABS:RestoreAction(i, type, actionID, binding, ...)
 		PickupItem(actionID)
 
 		if( GetCursorInfo() ~= type ) then
-			-- Ghost hunt! Check if it's already on the bar somewhere so we can move it
-			for j=1, MAX_ACTION_BUTTONS do
-				local actionType, id = GetActionInfo(j)
-				if( actionType == "item" and tonumber(id) == tonumber(actionID) ) then
-					PickupAction(j)
-					break
-				end
-			end
-		end
-
-		if( GetCursorInfo() ~= type ) then
 			local itemName = select(1, ...)
 			table.insert(restoreErrors, string.format(L["Unable to restore item \"%s\" to slot #%d, cannot be found in inventory."], itemName and itemName ~= "" and itemName or actionID, i))
 			ClearCursor()
