@@ -250,9 +250,13 @@ function UI:ShowProfileList(mode)
                 ABS:SaveProfile(setName)
                 self.MainFrame:Hide()
             else
-                ABS.db.sets[playerClass][setName] = nil
-                ABS:Print(string.format(L["Deleted saved profile %s."], setName))
-                self:ShowProfileList("DELETE")
+                if ActionBarSaverDB.autoSwitch and (setName == "ConsolePortON" or setName == "ConsolePortOFF") then
+                    ABS:Print(string.format("Cannot delete reserved profile \"%s\" while Auto-Switch is enabled.", setName))
+                else
+                    ABS.db.sets[playerClass][setName] = nil
+                    ABS:Print(string.format(L["Deleted saved profile %s."], setName))
+                    self:ShowProfileList("DELETE")
+                end
             end
         end)
         btn:SetPoint("TOP", 0, -offset)

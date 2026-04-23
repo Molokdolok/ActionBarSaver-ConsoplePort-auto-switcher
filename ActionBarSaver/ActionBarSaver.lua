@@ -8,6 +8,8 @@ local L = ABS.locals
 
 local restoreErrors, spellCache, macroCache, macroNameCache, highestRanks = {}, {}, {}, {}, {}
 local iconCache, playerClass
+local restoreTimer, pendingProfile, retryAttempts = 0, nil, 0
+local failedSlots = {}
 
 local MAX_MACROS = 54
 local MAX_CHAR_MACROS = 18
@@ -121,6 +123,25 @@ function ABS:FindMacro(id, name, data)
 	return nil
 end
 
+-- Cache available macros
+function ABS:CacheMacros()
+	table.wipe(macroCache)
+	table.wipe(macroNameCache)
+	local blacklist = {}
+	for i=1, MAX_MACROS do
+		local name, icon, macro = GetMacroInfo(i)
+		if( name ) then
+			if( macroNameCache[name] ) then
+				blacklist[name] = true
+				macroNameCache[name] = i
+			elseif( not blacklist[name] ) then
+				macroNameCache[name] = i
+			end
+		end
+		macroCache[i] = macro and self:CompressText(macro) or nil
+	end
+end
+
 -- Restore any macros that don't exist
 function ABS:RestoreMacros(set)
 	local perCharacter = true
@@ -158,22 +179,7 @@ function ABS:RestoreMacros(set)
 	end
 	
 	-- Recache macros due to any additions
-	local blacklist = {}
-	for i=1, MAX_MACROS do
-		local name, icon, macro = GetMacroInfo(i)
-		
-		if( name ) then
-			-- If there are macros with the same name, then blacklist and don't look by name
-			if( macroNameCache[name] ) then
-				blacklist[name] = true
-				macroNameCache[name] = i
-			elseif( not blacklist[name] ) then
-				macroNameCache[name] = i
-			end
-		end
-		
-		macroCache[i] = macro and self:CompressText(macro) or nil
-	end
+	self:CacheMacros()
 end
 
 -- Restore a saved profile
@@ -181,16 +187,15 @@ function ABS:RestoreProfile(name, overrideClass)
 	self.db.lastProfile = name
 	local set = self.db.sets[overrideClass or playerClass][name]
 	if( not set ) then
-		self:Print(string.format(L["No profile with the name \"%s\" exists."], set))
+		self:Print(string.format(L["No profile with the name \"%s\" exists."], name))
 		return
 	elseif( InCombatLockdown() ) then
-		self:Print(String.format(L["Unable to restore profile \"%s\", you are in combat."], set))
+		self:Print(string.format(L["Unable to restore profile \"%s\", you are in combat."], name))
 		return
 	end
 	
-	table.wipe(macroCache)
 	table.wipe(spellCache)
-	table.wipe(macroNameCache)
+	self:CacheMacros()
 	
 	-- Cache spells
 	for book=1, MAX_SKILLLINE_TABS do
@@ -209,30 +214,6 @@ function ABS:RestoreProfile(name, overrideClass)
 			end
 		end
 	end
-		
-	
-	-- Cache macros
-	local blacklist = {}
-	for i=1, MAX_MACROS do
-		local name, icon, macro = GetMacroInfo(i)
-		
-		if( name ) then
-			-- If there are macros with the same name, then blacklist and don't look by name
-			if( macroNameCache[name] ) then
-				blacklist[name] = true
-				macroNameCache[name] = i
-			elseif( not blacklist[name] ) then
-				macroNameCache[name] = i
-			end
-		end
-		
-		macroCache[i] = macro and self:CompressText(macro) or nil
-	end
-	
-	-- Check if we need to restore any missing macros
-	if( self.db.macro ) then
-		self:RestoreMacros(set)
-	end
 	
 	-- Start fresh with nothing on the cursor
 	ClearCursor()
@@ -242,19 +223,58 @@ function ABS:RestoreProfile(name, overrideClass)
 	-- Turn sound off
 	SetCVar("Sound_EnableAllSound", 0)
 
+	table.wipe(failedSlots)
+
+	-- Macros are already cached above
+	
+	-- Check if we need to restore any missing macros
+	if( self.db.macro ) then
+		self:RestoreMacros(set)
+	end
+
 	for i=1, MAX_ACTION_BUTTONS do
 		if( i < POSSESSION_START or i > POSSESSION_END ) then
 			local type, id = GetActionInfo(i)
-		
-			-- Clear the current spot
-			if( id or type ) then
+			local profileAction = set[i]
+			
+			if( profileAction ) then
+				local pType, pID, pBinding, pName = string.split("|", profileAction)
+				local matches = false
+				
+				-- Check if already restored (Smart Restore)
+				if( type == pType ) then
+					if( type == "spell" ) then
+						local spell = GetSpellName(id, BOOKTYPE_SPELL)
+						if( spell == pName ) then matches = true end
+					elseif( type == "item" ) then
+						if( tonumber(id) == tonumber(pID) ) then matches = true end
+					elseif( type == "macro" ) then
+						local name = GetMacroInfo(id)
+						if( name == self:UncompressText(pName) ) then matches = true end
+					elseif( type == "companion" or type == "equipmentset" ) then
+						if( tostring(id) == tostring(pID) ) then matches = true end
+					end
+				end
+				
+				if( not matches ) then
+					-- Clear the current spot
+					if( id or type ) then
+						PickupAction(i)
+						ClearCursor()
+					end
+					-- Restore this spot
+					self:RestoreAction(i, string.split("|", profileAction))
+					
+					-- Check if it failed
+					local newType = GetActionInfo(i)
+					if( not newType ) then
+						table.insert(failedSlots, i)
+					end
+				end
+			elseif( id or type ) then
+				-- Clear the spot if it shouldn't have anything
 				PickupAction(i)
 				ClearCursor()
-			end
-		
-			-- Restore this spot
-			if( set[i] ) then
-				self:RestoreAction(i, string.split("|", set[i]))
 			end
 		end
 	end
@@ -263,10 +283,19 @@ function ABS:RestoreProfile(name, overrideClass)
 	SetCVar("Sound_EnableAllSound", soundToggle)
 	
 	-- Done!
-	if( #(restoreErrors) == 0 ) then
+	if( #(restoreErrors) == 0 and #(failedSlots) == 0 ) then
 		self:Print(string.format(L["Restored profile %s!"], name))
+		retryAttempts = 0
+	elseif( #(failedSlots) > 0 and retryAttempts < 6 ) then
+		retryAttempts = retryAttempts + 1
+		pendingProfile = name
+		restoreTimer = 1
+		if retryAttempts == 1 then
+			self:Print(string.format(L["Profile %s restored with %d missing items. Retrying every 1s for 6s..."], name, #(failedSlots)))
+		end
 	else
-		self:Print(string.format(L["Restored profile %s, failed to restore %d buttons type /abs errors for more information."], name, #(restoreErrors)))
+		self:Print(string.format(L["Restored profile %s, failed to restore %d buttons type /abs errors for more information."], name, #(restoreErrors) + #(failedSlots)))
+		retryAttempts = 0
 	end
 end
 
@@ -282,13 +311,13 @@ function ABS:RestoreAction(i, type, actionID, binding, ...)
 		
 		if( GetCursorInfo() ~= type ) then
 			-- Bad restore, check if we should link at all
-			local lowerSpell = string.lower(spellName)
+			local lowerSpell = string.lower(spellName or "")
 			for spell, linked in pairs(self.db.spellSubs) do
 				if( lowerSpell == spell and spellCache[linked] ) then
-					self:RestoreAction(i, type, actionID, binding, linked, nil, arg3)
+					self:RestoreAction(i, type, actionID, binding, linked, nil, select(3, ...))
 					return
 				elseif( lowerSpell == linked and spellCache[spell] ) then
-					self:RestoreAction(i, type, actionID, binding, spell, nil, arg3)
+					self:RestoreAction(i, type, actionID, binding, spell, nil, select(3, ...))
 					return
 				end
 			end
@@ -334,7 +363,18 @@ function ABS:RestoreAction(i, type, actionID, binding, ...)
 		PickupItem(actionID)
 
 		if( GetCursorInfo() ~= type ) then
-			local itemName = select(i, ...)
+			-- Ghost hunt! Check if it's already on the bar somewhere so we can move it
+			for j=1, MAX_ACTION_BUTTONS do
+				local actionType, id = GetActionInfo(j)
+				if( actionType == "item" and tonumber(id) == tonumber(actionID) ) then
+					PickupAction(j)
+					break
+				end
+			end
+		end
+
+		if( GetCursorInfo() ~= type ) then
+			local itemName = select(1, ...)
 			table.insert(restoreErrors, string.format(L["Unable to restore item \"%s\" to slot #%d, cannot be found in inventory."], itemName and itemName ~= "" and itemName or actionID, i))
 			ClearCursor()
 			return
@@ -517,12 +557,27 @@ end
 -- Check if we need to load
 local function AutoLoad(name)
 	if( ABS.db.sets[playerClass][name] ) then
-		ABS:RestoreProfile(name)
+		pendingProfile = name
+		restoreTimer = 1
+		ABS:Print(string.format("Loading profile \"%s\" (retrying every 1s for 6s)...", name))
 	else
 		ABS:SaveProfile(name)
 		ABS.db.lastProfile = name
 	end
 end
+
+local timerFrame = CreateFrame("Frame")
+timerFrame:SetScript("OnUpdate", function(self, elapsed)
+    if( restoreTimer > 0 ) then
+        restoreTimer = restoreTimer - elapsed
+        if( restoreTimer <= 0 ) then
+            if( pendingProfile ) then
+                ABS:RestoreProfile(pendingProfile)
+                pendingProfile = nil
+            end
+        end
+    end
+end)
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
